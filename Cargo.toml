@@ -2,5 +2,15 @@
 name = "substruct"
 version = "0.1.0"
 edition = "2021"
+authors = ["Sean Lynch <sean@lynches.ca>"]
+license = "MIT OR Apache-2.0"
+
+[lib]
+proc-macro = true
 
 [dependencies]
+heck = "0.5.0"
+proc-macro2 = "1.0.69"
+quote = "1.0.33"
+syn = { version = "2.0.39", features = ["parsing"] }
+
