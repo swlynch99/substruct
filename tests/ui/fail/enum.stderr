@@ -1,0 +1,5 @@
+error: #[substruct] does not support enums
+ --> tests/ui/fail/enum.rs:4:5
+  |
+4 | pub enum A {
+  |     ^^^^

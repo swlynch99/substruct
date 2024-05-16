@@ -1,5 +1,5 @@
 error: expressions are not permitted within a struct-level #[substruct] annotation
- --> tests/ui/expr-in-top-level-attr.rs:3:13
+ --> tests/ui/fail/expr-in-top-level-attr.rs:3:13
   |
 3 | #[substruct(any(A, B, C))]
   |             ^^^^^^^^^^^^

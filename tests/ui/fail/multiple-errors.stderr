@@ -1,0 +1,11 @@
+error: unexpected token
+ --> tests/ui/fail/multiple-errors.rs:5:32
+  |
+5 |     #[substruct_attr(blah, blah, blah)]
+  |                                ^
+
+error: unexpected token
+ --> tests/ui/fail/multiple-errors.rs:6:32
+  |
+6 |     #[substruct_attr(blah, bleh, blah)]
+  |                                ^

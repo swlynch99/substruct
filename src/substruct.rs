@@ -30,7 +30,7 @@ impl Parse for SubstructInputArg {
             if !attr.path().is_ident("doc") {
                 return Err(syn::Error::new(
                     attr.span(),
-                    "only #[doc] overrides are permitted on input expressions",
+                    "only #[doc] attributes are permitted within #[substruct] arguments",
                 ));
             }
         }
@@ -94,7 +94,14 @@ struct Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
-    pub fn from_input(input: &'a syn::DeriveInput, attr: SubstructInput) -> Self {
+    pub fn from_input(input: &'a syn::DeriveInput, attr: SubstructInput) -> syn::Result<Self> {
+        if let syn::Data::Enum(data) = &input.data {
+            return Err(syn::Error::new(
+                data.enum_token.span,
+                "#[substruct] does not support enums"
+            ))
+        }
+        
         let mut errors = Vec::new();
         let mut args: IndexMap<syn::Ident, TopLevelArg> = attr
             .args
@@ -115,12 +122,12 @@ impl<'a> Emitter<'a> {
             args.insert(input.ident.clone(), TopLevelArg { docs: Vec::new() });
         }
 
-        Self {
+        Ok(Self {
             input,
             args: Rc::new(args),
             errors,
             tokens: TokenStream::new(),
-        }
+        })
     }
 
     pub fn emit(mut self) -> TokenStream {
@@ -153,7 +160,8 @@ impl<'a> Emitter<'a> {
         self.filter_attrs(&mut input.attrs, name);
 
         match &mut input.data {
-            syn::Data::Enum(_) => panic!("Attempted to emit substruct on an enum"),
+            syn::Data::Enum(_) => return,
+            // syn::Data::Enum(_) => panic!("Attempted to emit substruct on an enum"),
             syn::Data::Struct(data) => match &mut data.fields {
                 syn::Fields::Named(fields) => self.filter_fields_named(fields, name),
                 syn::Fields::Unnamed(fields) => self.filter_fields_unnamed(fields, name),
@@ -369,7 +377,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     let input: syn::DeriveInput = syn::parse2(item)?;
     let args: SubstructInput = syn::parse2(attr)?;
 
-    Ok(Emitter::from_input(&input, args).emit())
+    Ok(Emitter::from_input(&input, args)?.emit())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
