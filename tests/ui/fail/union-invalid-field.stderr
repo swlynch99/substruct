@@ -1,0 +1,21 @@
+error[E0609]: no field `y` on type `C`
+  --> tests/ui/fail/union-invalid-field.rs:15:11
+   |
+15 |     value.y = 1;
+   |           ^ unknown field
+   |
+help: a field with a similar name exists
+   |
+15 |     value.x = 1;
+   |           ~
+
+error[E0609]: no field `z` on type `C`
+  --> tests/ui/fail/union-invalid-field.rs:16:11
+   |
+16 |     value.z = 1;
+   |           ^ unknown field
+   |
+help: a field with a similar name exists
+   |
+16 |     value.x = 1;
+   |           ~
