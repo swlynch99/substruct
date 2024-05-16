@@ -17,4 +17,5 @@ syn = { version = "2.0.39", features = ["parsing"] }
 
 [dev-dependencies]
 serde = { version = "1.0.202", features = ["derive"] }
+trybuild = "1.0.96"
 
