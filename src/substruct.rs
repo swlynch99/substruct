@@ -1,240 +1,399 @@
-use std::collections::HashSet;
+use std::rc::Rc;
 
 use heck::ToSnakeCase;
-use proc_macro2::{Ident, Span, TokenStream};
-use quote::quote;
-use syn::parse::Parse;
+use indexmap::IndexMap;
+use proc_macro2::{Span, TokenStream};
+use quote::ToTokens;
+use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 
-struct Args(Punctuated<Ident, syn::Token![,]>);
+use crate::expr::Expr;
 
-impl Parse for Args {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        Ok(Self(Punctuated::parse_terminated(input)?))
-    }
+/// A single input argument to the `#[substruct]` attribute.
+///
+/// ```text
+/// /// Some doc comment
+/// #[doc = "or doc attribute"]
+/// <expr>
+/// ```
+struct SubstructInputArg {
+    docs: Vec<syn::Attribute>,
+    expr: Expr,
 }
 
-struct Metadata {
-    fields: HashSet<(usize, Ident)>,
-}
+impl Parse for SubstructInputArg {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let attrs = syn::Attribute::parse_outer(input)?;
 
-impl Metadata {
-    fn from_input(args: &Args, data: &syn::DataStruct) -> syn::Result<Self> {
-        let mut fields = HashSet::new();
-        let valid: HashSet<Ident> = args.0.iter().cloned().collect();
-
-        for (idx, field) in data.fields.iter().enumerate() {
-            let attr = match field
-                .attrs
-                .iter()
-                .find(|attr| attr.meta.path().is_ident("substruct"))
-            {
-                Some(attr) => attr,
-                None => continue,
-            };
-
-            let list = attr.meta.require_list()?;
-            let args: Args = syn::parse2(list.tokens.clone())?;
-
-            for substruct in args.0 {
-                if !valid.contains(&substruct) {
-                    return Err(syn::Error::new(
-                        substruct.span(),
-                        format!("struct name `{substruct}` does not appear the the top-level list of structs to create")
-                    ));
-                }
-
-                fields.insert((idx, substruct));
+        for attr in &attrs {
+            if !attr.path().is_ident("doc") {
+                return Err(syn::Error::new(
+                    attr.span(),
+                    "only #[doc] overrides are permitted on input expressions",
+                ));
             }
         }
 
-        Ok(Self { fields })
+        Ok(Self {
+            docs: attrs,
+            expr: input.parse()?,
+        })
+    }
+}
+
+#[derive(Default)]
+struct SubstructInput {
+    args: Punctuated<SubstructInputArg, syn::Token![,]>,
+}
+
+impl SubstructInput {
+    pub fn matching(&self, ident: &syn::Ident) -> Option<&SubstructInputArg> {
+        self.args.iter().find(|arg| arg.expr.evaluate(ident))
+    }
+}
+
+impl Parse for SubstructInput {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        Ok(Self {
+            args: Punctuated::parse_terminated(input)?,
+        })
+    }
+}
+
+struct SubstructAttrInput {
+    expr: Expr,
+    _comma: syn::Token![,],
+    meta: syn::Meta,
+}
+
+impl Parse for SubstructAttrInput {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        Ok(Self {
+            expr: input.parse()?,
+            _comma: input.parse()?,
+            meta: input.parse()?,
+        })
+    }
+}
+
+struct TopLevelArg {
+    docs: Vec<syn::Attribute>,
+}
+
+struct Emitter<'a> {
+    input: &'a syn::DeriveInput,
+
+    /// Use indexmap so that structs are emitted in the order they are specified
+    /// in the macro arguments.
+    args: Rc<IndexMap<syn::Ident, TopLevelArg>>,
+
+    errors: Vec<syn::Error>,
+
+    tokens: TokenStream,
+}
+
+impl<'a> Emitter<'a> {
+    pub fn from_input(input: &'a syn::DeriveInput, attr: SubstructInput) -> Self {
+        let mut errors = Vec::new();
+        let mut args: IndexMap<syn::Ident, TopLevelArg> = attr
+            .args
+            .into_iter()
+            .filter_map(|arg| match arg.expr {
+                Expr::Ident(ident) => Some((ident.clone(), TopLevelArg { docs: arg.docs })),
+                expr => {
+                    errors.push(syn::Error::new_spanned(
+                    expr,
+                    "expressions are not permitted within a struct-level #[substruct] annotation",
+                ));
+                    None
+                }
+            })
+            .collect();
+
+        if !args.contains_key(&input.ident) {
+            args.insert(input.ident.clone(), TopLevelArg { docs: Vec::new() });
+        }
+
+        Self {
+            input,
+            args: Rc::new(args),
+            errors,
+            tokens: TokenStream::new(),
+        }
     }
 
-    fn substruct_includes_field(&self, substruct: &Ident, field: usize) -> bool {
-        self.fields.contains(&(field, substruct.clone()))
+    pub fn emit(mut self) -> TokenStream {
+        let args = self.args.clone();
+        for name in args.keys() {
+            self.emit_struct(name);
+        }
+
+        for error in self.errors.drain(..) {
+            self.tokens.extend(error.into_compile_error())
+        }
+
+        self.tokens
     }
 
-    fn emit_substruct(
-        &self,
-        mut input: syn::DeriveInput,
-        name: &Ident,
-    ) -> syn::Result<TokenStream> {
-        let original = std::mem::replace(&mut input.ident, name.clone());
-        let data = match &mut input.data {
-            syn::Data::Struct(data) => data,
-            _ => unreachable!(),
+    fn emit_struct(&mut self, name: &syn::Ident) {
+        let tla = match self.args.get(name) {
+            Some(tla) => tla,
+            None => panic!("Attempted to emit struct `{name}` with no corresponding entry in the top-level arguments")
         };
 
-        let mut excluded = Vec::new();
-        let mut incindices = Vec::new();
+        let mut input = self.input.clone();
+        input.ident = name.clone();
 
-        data.fields = match &mut data.fields {
-            syn::Fields::Unit => syn::Fields::Unit,
-            syn::Fields::Named(fields) => {
-                let mut included = Punctuated::new();
+        if !tla.docs.is_empty() {
+            input.attrs.retain(|attr| !attr.path().is_ident("doc"));
+            input.attrs.extend_from_slice(&tla.docs);
+        }
 
-                for (idx, field) in std::mem::take(&mut fields.named).into_iter().enumerate() {
-                    if self.substruct_includes_field(name, idx) {
-                        included.push(field);
-                        incindices.push(idx);
-                    } else {
-                        excluded.push((idx, field));
-                    }
-                }
+        self.filter_attrs(&mut input.attrs, name);
 
-                syn::Fields::Named(syn::FieldsNamed {
-                    brace_token: fields.brace_token,
-                    named: included,
-                })
-            }
-            syn::Fields::Unnamed(fields) => {
-                let mut included = Punctuated::new();
-
-                for (idx, field) in std::mem::take(&mut fields.unnamed).into_iter().enumerate() {
-                    if self.substruct_includes_field(name, idx) {
-                        included.push(field);
-                        incindices.push(idx);
-                    } else {
-                        excluded.push((idx, field));
-                    }
-                }
-
-                syn::Fields::Unnamed(syn::FieldsUnnamed {
-                    paren_token: fields.paren_token,
-                    unnamed: included,
-                })
-            }
+        match &mut input.data {
+            syn::Data::Enum(_) => panic!("Attempted to emit substruct on an enum"),
+            syn::Data::Struct(data) => match &mut data.fields {
+                syn::Fields::Named(fields) => self.filter_fields_named(fields, name),
+                syn::Fields::Unnamed(fields) => self.filter_fields_unnamed(fields, name),
+                syn::Fields::Unit => (),
+            },
+            syn::Data::Union(data) => self.filter_fields_named(&mut data.fields, name),
         };
+
+        input.to_tokens(&mut self.tokens);
+
+        if input.ident != self.input.ident {
+            self.emit_conversions(&input);
+        }
+    }
+
+    fn emit_conversions(&mut self, substruct: &syn::DeriveInput) {
+        if !self.errors.is_empty() {
+            return;
+        }
+
+        let original = &self.input.ident;
+        let name = &substruct.ident;
+        let (impl_generics, ty_generics, where_clause) = substruct.generics.split_for_impl();
 
         let method = syn::Ident::new(
-            &format!("into_{}", original.to_string().to_snake_case()),
+            &format!("into_{}", self.input.ident.to_string().to_snake_case()),
             Span::call_site(),
         );
+        let doc: syn::Attribute = syn::parse_quote!(
+            #[doc = concat!("Convert `self` into a [`", stringify!(#original), "`].")]
+        );
 
-        let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-        let extra_impl = match &data.fields {
-            syn::Fields::Unit => quote!(),
-            syn::Fields::Named(fields) => {
-                let names: Vec<_> = excluded
-                    .iter()
-                    .map(|(_, field)| field.ident.as_ref().unwrap())
-                    .collect();
-                let types: Vec<_> = excluded.iter().map(|(_, field)| &field.ty).collect();
-                let existing: Vec<_> = fields
-                    .named
-                    .iter()
-                    .map(|field| field.ident.as_ref().unwrap())
-                    .collect();
+        let fields = match &self.input.data {
+            syn::Data::Enum(_) => panic!("Attempted to emit conversions for an enum"),
+            // Emitting conversions for an enum doesn't make sense
+            syn::Data::Union(_) => return,
+            // Unit structs have no fields and so they have no conversions
+            syn::Data::Struct(data) if matches!(data.fields, syn::Fields::Unit) => return,
+            syn::Data::Struct(data) => &data.fields,
+        };
 
-                quote! {
-                    impl #impl_generics #name #ty_generics
-                    #where_clause
-                    {
-                        pub fn #method(self, #( #names: #types, )*) -> #original #ty_generics {
-                            #original {
-                                #( #names, )*
-                                #( #existing: self.#existing, )*
-                            }
-                        }
-                    }
+        let mut included = IndexMap::new();
+        let mut excluded = IndexMap::new();
 
-                    impl #impl_generics From<#original #ty_generics> for #name #ty_generics
-                    #where_clause
-                    {
-                        fn from(value: #original #ty_generics) -> Self {
-                            Self {
-                                #( #existing: value.#existing, )*
-                            }
-                        }
+        for (index, mut field) in fields.iter().cloned().enumerate() {
+            let filter = self.filter_field(&mut field, &substruct.ident);
+            let id = match field.ident {
+                Some(ident) => IdentOrIndex::Ident(ident),
+                None => IdentOrIndex::Index(index),
+            };
+
+            if filter {
+                included.insert(id, field.ty);
+            } else {
+                excluded.insert(id, field.ty);
+            }
+        }
+
+        let args: Vec<_> = excluded.keys().cloned().map(|key| key.to_ident()).collect();
+        let types: Vec<_> = excluded.values().collect();
+
+        let inc_dst: Vec<_> = included.keys().collect();
+        // Renumber source indexes so they refer to the smaller struct
+        let inc_src: Vec<_> = included
+            .keys()
+            .enumerate()
+            .map(|(index, name)| match name {
+                IdentOrIndex::Ident(ident) => IdentOrIndex::Ident(ident.clone()),
+                IdentOrIndex::Index(_) => IdentOrIndex::Index(index),
+            })
+            .collect();
+        let exc: Vec<_> = excluded.keys().collect();
+
+        self.tokens.extend(quote::quote! {
+            impl #impl_generics #name #ty_generics
+            #where_clause
+            {
+                #doc
+                pub fn #method(self, #( #args: #types, )*) -> #original #ty_generics {
+                    #original {
+                        #( #inc_dst: self.#inc_src, )*
+                        #( #exc: #args, )*
                     }
                 }
             }
-            syn::Fields::Unnamed(_) => {
-                let existing_src: Vec<_> = (0..incindices.len())
-                    .map(|idx| syn::LitInt::new(&idx.to_string(), Span::call_site()))
-                    .collect();
-                let existing_dst: Vec<_> = incindices
-                    .iter()
-                    .map(|idx| syn::LitInt::new(&idx.to_string(), Span::call_site()))
-                    .collect();
+        });
 
-                let excluded_dst: Vec<_> = excluded
-                    .iter()
-                    .map(|(idx, _)| syn::LitInt::new(&idx.to_string(), Span::call_site()))
-                    .collect();
-
-                let names: Vec<_> = excluded
-                    .iter()
-                    .map(|(idx, _)| syn::Ident::new(&format!("arg{idx}"), Span::call_site()))
-                    .collect();
-                let types: Vec<_> = excluded.iter().map(|(_, field)| &field.ty).collect();
-
-                quote! {
-                    impl #impl_generics #name #ty_generics
-                    #where_clause
-                    {
-                        #[doc = concat!("Convert `self` into a `", stringify!(#original), "`.")]
-                        pub fn #method(self, #( #names: #types, )*) -> #original #ty_generics {
-                            #original {
-                                #( #existing_dst: self.#existing_src, )*
-                                #( #excluded_dst: #names, )*
-                            }
-                        }
-                    }
-
-                    impl #impl_generics From<#original #ty_generics> for #name #ty_generics
-                    #where_clause
-                    {
-                        fn from(value: #original #ty_generics) -> Self {
-                            Self {
-                                #( #existing_src: value.#existing_dst, )*
-                            }
-                        }
+        self.tokens.extend(quote::quote! {
+            impl #impl_generics From<#original #ty_generics> for #name #ty_generics
+            #where_clause
+            {
+                fn from(value: #original #ty_generics) -> Self {
+                    Self {
+                        #( #inc_src: value.#inc_dst, )*
                     }
                 }
+            }
+        });
+
+        if excluded.is_empty() {
+            self.tokens.extend(quote::quote! {
+                impl #impl_generics From<#name #ty_generics> for #original #ty_generics
+                #where_clause
+                {
+                    fn from(value: #name #ty_generics) -> Self {
+                        value.#method()
+                    }
+                }
+            })
+        }
+    }
+
+    fn filter_fields_named(&mut self, fields: &mut syn::FieldsNamed, name: &syn::Ident) {
+        fields.named = std::mem::take(&mut fields.named)
+            .into_pairs()
+            .filter_map(|mut pair| match self.filter_field(pair.value_mut(), name) {
+                true => Some(pair),
+                false => None,
+            })
+            .collect();
+    }
+
+    fn filter_fields_unnamed(&mut self, fields: &mut syn::FieldsUnnamed, name: &syn::Ident) {
+        fields.unnamed = std::mem::take(&mut fields.unnamed)
+            .into_pairs()
+            .filter_map(|mut pair| match self.filter_field(pair.value_mut(), name) {
+                true => Some(pair),
+                false => None,
+            })
+            .collect();
+    }
+
+    fn filter_field(&mut self, field: &mut syn::Field, name: &syn::Ident) -> bool {
+        let substruct: Vec<_> = field
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("substruct"))
+            .collect();
+
+        let mut substruct = match substruct {
+            substruct if substruct.is_empty() => Default::default(),
+            substruct => {
+                let args: Option<SubstructInput> = match substruct[0].parse_args() {
+                    Ok(args) => Some(args),
+                    Err(e) => {
+                        self.errors.push(e);
+                        None
+                    }
+                };
+
+                for attr in &substruct[1..] {
+                    self.errors.push(syn::Error::new_spanned(
+                        attr,
+                        "only one #[substruct] attribute is allowed on a field",
+                    ));
+                }
+
+                args.unwrap_or_default()
             }
         };
 
-        Ok(quote! {
-            #input
-            #extra_impl
+        substruct.args.push(SubstructInputArg {
+            docs: Vec::new(),
+            expr: Expr::Ident(self.input.ident.clone()),
+        });
+
+        let arg = match substruct.matching(name) {
+            Some(arg) => arg,
+            None => return false,
+        };
+
+        self.filter_attrs(&mut field.attrs, name);
+
+        if !arg.docs.is_empty() {
+            field.attrs.retain(|attr| !attr.path().is_ident("doc"));
+            field.attrs.extend_from_slice(&arg.docs);
+        }
+
+        true
+    }
+
+    fn filter_attrs(&mut self, attrs: &mut Vec<syn::Attribute>, name: &syn::Ident) {
+        attrs.retain_mut(|attr| {
+            let path = attr.path();
+
+            if path.is_ident("substruct") {
+                return false;
+            }
+
+            if !path.is_ident("substruct_attr") {
+                return true;
+            }
+
+            let args: SubstructAttrInput = match attr.parse_args() {
+                Ok(args) => args,
+                Err(e) => {
+                    self.errors.push(e);
+                    return false;
+                }
+            };
+
+            if args.expr.evaluate(name) {
+                attr.meta = args.meta;
+                true
+            } else {
+                false
+            }
         })
     }
 }
 
 pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
-    let mut input: syn::DeriveInput = syn::parse2(item)?;
-    let args: Args = syn::parse2(attr)?;
+    let input: syn::DeriveInput = syn::parse2(item)?;
+    let args: SubstructInput = syn::parse2(attr)?;
 
-    let data = match &mut input.data {
-        syn::Data::Struct(data) => data,
-        syn::Data::Enum(data) => {
-            return Err(syn::Error::new(
-                data.enum_token.span,
-                "substruct does not support enums",
-            ))
+    Ok(Emitter::from_input(&input, args).emit())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+enum IdentOrIndex {
+    Ident(syn::Ident),
+    Index(usize),
+}
+
+impl IdentOrIndex {
+    fn to_ident(self) -> syn::Ident {
+        match self {
+            Self::Ident(ident) => ident,
+            Self::Index(index) => syn::Ident::new(&format!("arg{index}"), Span::call_site()),
         }
-        syn::Data::Union(data) => {
-            return Err(syn::Error::new(
-                data.union_token.span,
-                "substruct does not support unions",
-            ))
+    }
+}
+
+impl ToTokens for IdentOrIndex {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        match self {
+            Self::Ident(ident) => ident.to_tokens(tokens),
+            Self::Index(index) => {
+                syn::LitInt::new(&index.to_string(), Span::call_site()).to_tokens(tokens)
+            }
         }
-    };
-
-    let metadata = Metadata::from_input(&args, data)?;
-
-    for field in &mut data.fields {
-        field
-            .attrs
-            .retain(|attr| !attr.path().is_ident("substruct"));
     }
-
-    let mut tokens = quote!(#input);
-    for substruct in args.0 {
-        tokens.extend(metadata.emit_substruct(input.clone(), &substruct)?);
-    }
-
-    Ok(tokens)
 }
