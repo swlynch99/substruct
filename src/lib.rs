@@ -20,7 +20,7 @@
 //!
 //! assert_eq!(subquery.into_query(5), query);
 //! ```
-//! 
+//!
 //! and that will expand to produce
 //! ```
 //! #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,7 +28,7 @@
 //!     pub a: &'static str,
 //!     pub b: usize
 //! }
-//! 
+//!
 //! #[derive(Clone, Debug, Eq, PartialEq)]
 //! pub struct SubQuery {
 //!     pub a: &'static str,

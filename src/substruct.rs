@@ -97,10 +97,10 @@ impl<'a> Emitter<'a> {
         if let syn::Data::Enum(data) = &input.data {
             return Err(syn::Error::new(
                 data.enum_token.span,
-                "#[substruct] does not support enums"
-            ))
+                "#[substruct] does not support enums",
+            ));
         }
-        
+
         let mut errors = Vec::new();
         let mut args: IndexMap<syn::Ident, TopLevelArg> = attr
             .args
@@ -219,7 +219,11 @@ impl<'a> Emitter<'a> {
             }
         }
 
-        let args: Vec<_> = excluded.keys().cloned().map(|key| key.into_ident()).collect();
+        let args: Vec<_> = excluded
+            .keys()
+            .cloned()
+            .map(|key| key.into_ident())
+            .collect();
         let types: Vec<_> = excluded.values().collect();
 
         let inc_dst: Vec<_> = included.keys().collect();
