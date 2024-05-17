@@ -220,7 +220,7 @@ impl<'a> Emitter<'a> {
             }
         }
 
-        let args: Vec<_> = excluded.keys().cloned().map(|key| key.to_ident()).collect();
+        let args: Vec<_> = excluded.keys().cloned().map(|key| key.into_ident()).collect();
         let types: Vec<_> = excluded.values().collect();
 
         let inc_dst: Vec<_> = included.keys().collect();
@@ -387,7 +387,7 @@ enum IdentOrIndex {
 }
 
 impl IdentOrIndex {
-    fn to_ident(self) -> syn::Ident {
+    fn into_ident(self) -> syn::Ident {
         match self {
             Self::Ident(ident) => ident,
             Self::Index(index) => syn::Ident::new(&format!("arg{index}"), Span::call_site()),
