@@ -20,6 +20,20 @@
 //!
 //! assert_eq!(subquery.into_query(5), query);
 //! ```
+//! 
+//! and that will expand to produce
+//! ```
+//! #[derive(Clone, Debug, Eq, PartialEq)]
+//! pub struct Query {
+//!     pub a: &'static str,
+//!     pub b: usize
+//! }
+//! 
+//! #[derive(Clone, Debug, Eq, PartialEq)]
+//! pub struct SubQuery {
+//!     pub a: &'static str,
+//! }
+//! ```
 //!
 //! Substruct isn't just limited to creating a single child struct, you can use
 //! it to create many at once:
@@ -206,6 +220,11 @@
 //! ```
 
 use proc_macro::TokenStream;
+
+#[allow(dead_code)]
+#[doc = include_str!("../README.md")]
+#[cfg(doc)]
+mod readme {}
 
 mod expr;
 mod substruct;
