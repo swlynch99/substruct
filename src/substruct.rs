@@ -6,7 +6,6 @@ use proc_macro2::{Span, TokenStream};
 use quote::ToTokens;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::spanned::Spanned;
 
 use crate::expr::Expr;
 
@@ -28,8 +27,8 @@ impl Parse for SubstructInputArg {
 
         for attr in &attrs {
             if !attr.path().is_ident("doc") {
-                return Err(syn::Error::new(
-                    attr.span(),
+                return Err(syn::Error::new_spanned(
+                    &attr,
                     "only #[doc] attributes are permitted within #[substruct] arguments",
                 ));
             }

@@ -1,4 +1,8 @@
 # substruct
+![[crates.io](https://crates.io/crate/substruct)](https://img.shields.io/crates/v/substruct)
+![[license](https://crates.io/crate/substruct)](https://img.shields.io/crates/l/substruct)
+![[docs.rs](https://docs.rs/substruct)](https://img.shields.io/docsrs/substruct)
+![ci](https://img.shields.io/github/actions/workflow/status/swlynch99/substruct/cargo.yml)
 
 Substruct is a proc-macro wich allows you to easily declare strucs which are
 subsets of another struct.
