@@ -96,7 +96,7 @@ jobs:
           retention-days: 1
 
   clippy-upload:
-    if: github.event_name == 'pull_request' || github.ref == 'reads/heads/main'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     needs:
       - clippy
