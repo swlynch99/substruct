@@ -1,0 +1,5 @@
+error: only one #[substruct] attribute is allowed on a field
+ --> tests/ui/fail/multiple-attr-on-field.rs:6:5
+  |
+6 |     #[substruct(C)]
+  |     ^^^^^^^^^^^^^^^
