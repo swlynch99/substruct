@@ -233,13 +233,9 @@ mod substruct;
 ///
 /// See the [crate docs](crate) for detailed docs.
 #[proc_macro_attribute]
-pub fn substruct(attr: TokenStream, mut item: TokenStream) -> TokenStream {
-    match crate::substruct::expand(attr.into(), item.clone().into()) {
+pub fn substruct(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match crate::substruct::expand(attr.into(), item.into()) {
         Ok(tokens) => tokens.into(),
-        Err(e) => {
-            let tokens: TokenStream = e.to_compile_error().into();
-            item.extend(tokens);
-            item
-        }
+        Err(e) => e.to_compile_error().into(),
     }
 }

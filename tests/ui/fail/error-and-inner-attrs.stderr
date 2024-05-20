@@ -1,0 +1,5 @@
+error: only #[doc] attributes are permitted within #[substruct] arguments
+ --> tests/ui/fail/error-and-inner-attrs.rs:4:5
+  |
+4 |     #[derive(Debug)]
+  |     ^^^^^^^^^^^^^^^^
