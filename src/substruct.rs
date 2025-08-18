@@ -185,17 +185,18 @@ impl<'a> Emitter<'a> {
         let name = &substruct.ident;
         let (impl_generics, ty_generics, where_clause) = substruct.generics.split_for_impl();
 
+        let mut attrs = Vec::<syn::Attribute>::new();
         let method = syn::Ident::new(
             &format!("into_{}", self.input.ident.to_string().to_snake_case()),
             Span::call_site(),
         );
-        let doc: syn::Attribute = syn::parse_quote!(
+        attrs.push(syn::parse_quote!(
             #[doc = concat!("Convert `self` into a [`", stringify!(#original), "`].")]
-        );
+        ));
 
         let fields = match &self.input.data {
             syn::Data::Enum(_) => panic!("Attempted to emit conversions for an enum"),
-            // Emitting conversions for an enum doesn't make sense
+            // Emitting conversions for a union doesn't make sense
             syn::Data::Union(_) => return,
             // Unit structs have no fields and so they have no conversions
             syn::Data::Struct(data) if matches!(data.fields, syn::Fields::Unit) => return,
@@ -238,11 +239,15 @@ impl<'a> Emitter<'a> {
             .collect();
         let exc: Vec<_> = excluded.keys().collect();
 
+        if args.len() > 5 {
+            attrs.push(syn::parse_quote!(#[allow(clippy::too_many_arguments)]))
+        }
+
         self.tokens.extend(quote::quote! {
             impl #impl_generics #name #ty_generics
             #where_clause
             {
-                #doc
+                #( #attrs )*
                 pub fn #method(self, #( #args: #types, )*) -> #original #ty_generics {
                     #original {
                         #( #inc_dst: self.#inc_src, )*
