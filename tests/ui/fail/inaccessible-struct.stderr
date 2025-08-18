@@ -7,11 +7,11 @@ error[E0603]: struct `A` is private
 note: the struct `A` is defined here
   --> tests/ui/fail/inaccessible-struct.rs:4:17
    |
- 4 |       #[substruct(pub(self) A)]
+4  |       #[substruct(pub(self) A)]
    |  _________________^
- 5 | |     #[derive(Default)]
- 6 | |     pub struct Test {
- 7 | |         #[substruct(A)]
- 8 | |         pub field: u32,
- 9 | |     }
+5  | |     #[derive(Default)]
+6  | |     pub struct Test {
+7  | |         #[substruct(A)]
+8  | |         pub field: u32,
+9  | |     }
    | |_____^
