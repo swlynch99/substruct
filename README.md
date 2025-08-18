@@ -76,6 +76,10 @@ pub struct QueryParams {
     #[substruct_attr(not(QueryParams), serde(rename = "before_ts"))]
     pub after: Option<SystemTime>,
 
+    // This field has a pub(crate) visibility on ThreadQueryParams
+    #[substruct(pub(crate) ThreadQueryParams)]
+    pub hidden: bool,
+
     // Limit is only present on QueryParams.
     pub limit: Option<usize>,
 }
@@ -87,4 +91,5 @@ used by all of the child structs.
 
 
 # See Also
-- The [subenum](https://crates.io/crates/subenum)
+- The [subenum](https://crates.io/crates/subenum) crate offers the same thing
+  for enums.
