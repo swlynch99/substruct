@@ -1,4 +1,3 @@
-
 mod inner {
     use substruct::substruct;
 

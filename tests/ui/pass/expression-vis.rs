@@ -1,12 +1,9 @@
-
-
 mod inner {
     use substruct::substruct;
 
     #[substruct(A, B)]
     #[derive(Default)]
-    pub struct Test
-    {
+    pub struct Test {
         #[substruct(pub any(A, B))]
         field: u32,
     }
