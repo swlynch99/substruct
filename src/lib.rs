@@ -105,6 +105,32 @@
 //! }
 //! ```
 //!
+//! # Overriding visibility for emitted structs and fields
+//! Normally, `substruct` will copy the visibility definition over from the
+//! base struct. However, you can override it by adding a visibility specifier
+//! in front of the struct name within the `#[substruct]` attribute.
+//! ```
+//! # use substruct::substruct;
+//! #
+//! // Both A and B are pub, but C is pub(crate).
+//! #[substruct(B, pub(crate) C)]
+//! pub struct A {
+//!     // This field is public in structs A and C, but only pub(crate) in C.
+//!     #[substruct(pub(crate) B, C)]
+//!     pub field1: u32,
+//!
+//!     // Making a field private can be done by using pub(self)
+//!     #[substruct(pub(self) C)]
+//!     pub field2: u32,
+//!
+//!     // You can also override the visibility when using expressions.
+//!     // The overridden visibility applies to all structs specified in the
+//!     // expression.
+//!     #[substruct(pub(crate) any(B, C))]
+//!     pub field3: u32,
+//! }
+//! ```
+//!
 //! # Managing attributes on generated structs
 //! Sometimes you may want attributes to only apply to some of the emitted
 //! structs. To do so, you can use the `#[substruct_attr]` macro to only emit
@@ -166,7 +192,7 @@
 //! }
 //! ```
 //!
-//! > The parent struct as always implicitly included in the set of structs
+//! > The parent struct is always implicitly included in the set of structs
 //! > that each field is emitted for. This means that putting `not(A)` in the
 //! > the struct above would not exclude the field from `A` (and is, in fact,
 //! > equivalent to `all()`).
@@ -190,8 +216,8 @@
 //! }
 //! ```
 //!
-//! If multiple documentation overrides apply to a single field, then the first
-//! one to apply will be used.
+//! If multiple overrides apply to a single field, then the first one to apply
+//! will be used.
 //!
 //! # Generics
 //! Generics are currently _mostly_ supported. You can use generics with

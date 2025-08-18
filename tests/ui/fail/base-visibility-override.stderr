@@ -1,0 +1,5 @@
+error: cannot override the visibility of the base struct
+ --> tests/ui/fail/base-visibility-override.rs:3:13
+  |
+3 | #[substruct(pub(crate) Test)]
+  |             ^^^^^^^^^^

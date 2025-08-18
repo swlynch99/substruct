@@ -18,6 +18,7 @@ use crate::expr::Expr;
 /// ```
 struct SubstructInputArg {
     docs: Vec<syn::Attribute>,
+    vis: syn::Visibility,
     expr: Expr,
 }
 
@@ -36,6 +37,7 @@ impl Parse for SubstructInputArg {
 
         Ok(Self {
             docs: attrs,
+            vis: input.parse()?,
             expr: input.parse()?,
         })
     }
@@ -78,6 +80,7 @@ impl Parse for SubstructAttrInput {
 
 struct TopLevelArg {
     docs: Vec<syn::Attribute>,
+    vis: syn::Visibility,
 }
 
 struct Emitter<'a> {
@@ -106,7 +109,13 @@ impl<'a> Emitter<'a> {
             .args
             .into_iter()
             .filter_map(|arg| match arg.expr {
-                Expr::Ident(ident) => Some((ident.clone(), TopLevelArg { docs: arg.docs })),
+                Expr::Ident(ident) => Some((
+                    ident.clone(),
+                    TopLevelArg {
+                        docs: arg.docs,
+                        vis: arg.vis,
+                    },
+                )),
                 expr => {
                     errors.push(syn::Error::new_spanned(
                     expr,
@@ -118,7 +127,13 @@ impl<'a> Emitter<'a> {
             .collect();
 
         if !args.contains_key(&input.ident) {
-            args.insert(input.ident.clone(), TopLevelArg { docs: Vec::new() });
+            args.insert(
+                input.ident.clone(),
+                TopLevelArg {
+                    docs: Vec::new(),
+                    vis: syn::Visibility::Inherited,
+                },
+            );
         }
 
         Ok(Self {
@@ -151,6 +166,17 @@ impl<'a> Emitter<'a> {
         let mut input = self.input.clone();
         input.ident = name.clone();
 
+        if !matches!(tla.vis, syn::Visibility::Inherited) {
+            if *name == self.input.ident {
+                self.errors.push(syn::Error::new_spanned(
+                    &tla.vis,
+                    "cannot override the visibility of the base struct",
+                ));
+            }
+
+            input.vis = tla.vis.clone();
+        }
+
         if !tla.docs.is_empty() {
             input.attrs.retain(|attr| !attr.path().is_ident("doc"));
             input.attrs.extend_from_slice(&tla.docs);
@@ -168,6 +194,10 @@ impl<'a> Emitter<'a> {
             },
             syn::Data::Union(data) => self.filter_fields_named(&mut data.fields, name),
         };
+
+        input
+            .attrs
+            .push(syn::parse_quote!(#[allow(clippy::needless_pub_self)]));
 
         input.to_tokens(&mut self.tokens);
 
@@ -333,6 +363,7 @@ impl<'a> Emitter<'a> {
 
         substruct.args.push(SubstructInputArg {
             docs: Vec::new(),
+            vis: syn::Visibility::Inherited,
             expr: Expr::Ident(self.input.ident.clone()),
         });
 
@@ -342,6 +373,10 @@ impl<'a> Emitter<'a> {
         };
 
         self.filter_attrs(&mut field.attrs, name);
+
+        if !matches!(arg.vis, syn::Visibility::Inherited) {
+            field.vis = arg.vis.clone();
+        }
 
         if !arg.docs.is_empty() {
             field.attrs.retain(|attr| !attr.path().is_ident("doc"));
