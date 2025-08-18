@@ -1,5 +1,5 @@
 error[E0616]: field `field1` of struct `inner::A` is private
-  --> tests/ui/fail/inaccessible-field.rs:18:24
+  --> tests/ui/fail/inaccessible-field.rs:17:24
    |
-18 |     let _field = value.field1;
+17 |     let _field = value.field1;
    |                        ^^^^^^ private field
