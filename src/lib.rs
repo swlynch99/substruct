@@ -44,7 +44,7 @@
 //! pub struct Vec4<T> {
 //!     #[substruct(Vec2, Vec3)]
 //!     pub x: T,
-//!     
+//!
 //!     #[substruct(Vec2, Vec3)]
 //!     pub y: T,
 //!
@@ -243,6 +243,60 @@
 //!     pub name: String,
 //!     pub text: &'a str,
 //! }
+//! ```
+//!
+//! # Field Type Transformations
+//! Sometimes you may want a substruct to have a different type for a field than
+//! the parent struct. For example, you might want an optional field in the
+//! parent to be required in the substruct. This can be achieved by specifying
+//! transformations inline with the struct name:
+//!
+//! ```
+//! # use substruct::substruct;
+//! #[substruct(RequiredParams)]
+//! #[derive(Clone, Debug)]
+//! pub struct OptionalParams {
+//!     #[substruct(RequiredParams(unwrap))]
+//!     pub name: Option<String>,
+//!     pub limit: usize,
+//! }
+//!
+//! // The generated RequiredParams struct will have:
+//! // pub struct RequiredParams {
+//! //     pub name: String,  // Note: no longer Option<String>
+//! // }
+//!
+//! // This generates a TryFrom implementation instead of From:
+//! let optional = OptionalParams {
+//!     name: Some("test".to_string()),
+//!     limit: 10,
+//! };
+//! let required = RequiredParams::try_from(optional).unwrap();
+//! ```
+//!
+//! When field transformations are used, the macro generates:
+//! - A `TryFrom<ParentStruct>` implementation for the substruct
+//! - A conversion error type `{ParentStruct}ConversionError`
+//! - An `into_{parent_struct}` method that converts back to the parent
+//!
+//! The transformation is specified inline with the struct name:
+//! - `StructName(unwrap)`: Transforms `Option<T>` to `T` in the substruct
+//! - `StructName(try_into = TargetType)`: Transforms the field type using
+//!   `TryInto<TargetType>`
+//!
+//! Example using `try_into`:
+//! ```
+//! # use substruct::substruct;
+//! #[substruct(ConvertedParams)]
+//! #[derive(Clone)]
+//! pub struct OriginalParams {
+//!     #[substruct(ConvertedParams(try_into = u64))]
+//!     pub id: u32,
+//! }
+//!
+//! let original = OriginalParams { id: 42 };
+//! let converted = ConvertedParams::try_from(original).unwrap();
+//! assert_eq!(converted.id, 42u64);
 //! ```
 
 use proc_macro::TokenStream;

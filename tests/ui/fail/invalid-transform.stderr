@@ -1,0 +1,5 @@
+error: unknown transformation type, expected 'unwrap' or 'try_into'
+ --> tests/ui/fail/invalid-transform.rs:5:19
+  |
+5 |     #[substruct(B(invalid_transform))]
+  |                   ^^^^^^^^^^^^^^^^^

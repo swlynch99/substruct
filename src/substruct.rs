@@ -7,7 +7,7 @@ use quote::ToTokens;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 
-use crate::expr::Expr;
+use crate::expr::{Expr, TransformType};
 
 /// A single input argument to the `#[substruct]` attribute.
 ///
@@ -22,6 +22,26 @@ struct SubstructInputArg {
     expr: Expr,
 }
 
+/// Field transformation specification
+#[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum FieldTransform {
+    /// No transformation
+    None,
+    /// Transform Option<T> to T (unwrap the Option)
+    Unwrap,
+    /// Transform T to U using `TryInto`<U>
+    TryInto(Box<syn::Type>),
+}
+
+/// Field configuration for a specific substruct
+#[derive(Clone)]
+struct FieldConfig {
+    docs: Vec<syn::Attribute>,
+    vis: syn::Visibility,
+    transform: FieldTransform,
+}
+
 impl Parse for SubstructInputArg {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let attrs = syn::Attribute::parse_outer(input)?;
@@ -29,7 +49,7 @@ impl Parse for SubstructInputArg {
         for attr in &attrs {
             if !attr.path().is_ident("doc") {
                 return Err(syn::Error::new_spanned(
-                    &attr,
+                    attr,
                     "only #[doc] attributes are permitted within #[substruct] arguments",
                 ));
             }
@@ -90,6 +110,10 @@ struct Emitter<'a> {
     /// in the macro arguments.
     args: Rc<IndexMap<syn::Ident, TopLevelArg>>,
 
+    /// Track which substructs require `TryFrom` conversions due to field
+    /// transformations
+    requires_try_from: IndexMap<syn::Ident, bool>,
+
     errors: Vec<syn::Error>,
 
     tokens: TokenStream,
@@ -110,7 +134,14 @@ impl<'a> Emitter<'a> {
             .into_iter()
             .filter_map(|arg| match arg.expr {
                 Expr::Ident(ident) => Some((
-                    ident.clone(),
+                    ident,
+                    TopLevelArg {
+                        docs: arg.docs,
+                        vis: arg.vis,
+                    },
+                )),
+                Expr::IdentWithTransform(ident_with_transform) => Some((
+                    ident_with_transform.ident,
                     TopLevelArg {
                         docs: arg.docs,
                         vis: arg.vis,
@@ -139,6 +170,7 @@ impl<'a> Emitter<'a> {
         Ok(Self {
             input,
             args: Rc::new(args),
+            requires_try_from: IndexMap::new(),
             errors,
             tokens: TokenStream::new(),
         })
@@ -151,7 +183,7 @@ impl<'a> Emitter<'a> {
         }
 
         for error in self.errors.drain(..) {
-            self.tokens.extend(error.into_compile_error())
+            self.tokens.extend(error.into_compile_error());
         }
 
         self.tokens
@@ -193,7 +225,7 @@ impl<'a> Emitter<'a> {
                 syn::Fields::Unit => (),
             },
             syn::Data::Union(data) => self.filter_fields_named(&mut data.fields, name),
-        };
+        }
 
         input
             .attrs
@@ -206,6 +238,34 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    fn emit_try_from_error(&mut self) {
+        let original = &self.input.ident;
+        let error_name = syn::Ident::new(&format!("{original}ConversionError"), original.span());
+
+        self.tokens.extend(quote::quote! {
+            #[derive(Debug, Clone, PartialEq, Eq)]
+            pub enum #error_name {
+                MissingRequiredField(&'static str),
+                ConversionFailed(&'static str),
+            }
+
+            impl std::fmt::Display for #error_name {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    match self {
+                        Self::MissingRequiredField(field) => {
+                            write!(f, "Missing required field: {}", field)
+                        }
+                        Self::ConversionFailed(field) => {
+                            write!(f, "Failed to convert field: {}", field)
+                        }
+                    }
+                }
+            }
+
+            impl std::error::Error for #error_name {}
+        });
+    }
+
     fn emit_conversions(&mut self, substruct: &syn::DeriveInput) {
         if !self.errors.is_empty() {
             return;
@@ -213,10 +273,10 @@ impl<'a> Emitter<'a> {
 
         let original = &self.input.ident;
         let name = &substruct.ident;
-        let (impl_generics, ty_generics, where_clause) = substruct.generics.split_for_impl();
+        let (_impl_generics, _ty_generics, _where_clause) = substruct.generics.split_for_impl();
 
         let mut attrs = Vec::<syn::Attribute>::new();
-        let method = syn::Ident::new(
+        let _method = syn::Ident::new(
             &format!("into_{}", self.input.ident.to_string().to_snake_case()),
             Span::call_site(),
         );
@@ -235,25 +295,62 @@ impl<'a> Emitter<'a> {
 
         let mut included = IndexMap::new();
         let mut excluded = IndexMap::new();
+        let mut field_configs = IndexMap::new();
 
         for (index, mut field) in fields.iter().cloned().enumerate() {
-            let filter = self.filter_field(&mut field, &substruct.ident);
+            let (filter, config) = self.filter_field_with_config(&mut field, &substruct.ident);
             let id = match field.ident {
                 Some(ident) => IdentOrIndex::Ident(ident),
                 None => IdentOrIndex::Index(index),
             };
 
             if filter {
-                included.insert(id, field.ty);
+                included.insert(id.clone(), field.ty);
+                field_configs.insert(id, config);
             } else {
                 excluded.insert(id, field.ty);
             }
         }
 
+        let requires_try_from = field_configs.values().any(|config| {
+            matches!(
+                config.transform,
+                FieldTransform::Unwrap | FieldTransform::TryInto(_)
+            )
+        });
+        self.requires_try_from
+            .insert(name.clone(), requires_try_from);
+
+        if requires_try_from {
+            self.emit_try_from_conversions(substruct, &included, &excluded, &field_configs);
+        } else {
+            self.emit_regular_conversions(substruct, &included, &excluded);
+        }
+    }
+
+    fn emit_regular_conversions(
+        &mut self,
+        substruct: &syn::DeriveInput,
+        included: &IndexMap<IdentOrIndex, syn::Type>,
+        excluded: &IndexMap<IdentOrIndex, syn::Type>,
+    ) {
+        let original = &self.input.ident;
+        let name = &substruct.ident;
+        let (impl_generics, ty_generics, where_clause) = substruct.generics.split_for_impl();
+
+        let mut attrs = Vec::<syn::Attribute>::new();
+        let method = syn::Ident::new(
+            &format!("into_{}", self.input.ident.to_string().to_snake_case()),
+            Span::call_site(),
+        );
+        attrs.push(syn::parse_quote!(
+            #[doc = concat!("Convert `self` into a [`", stringify!(#original), "`].")]
+        ));
+
         let args: Vec<_> = excluded
             .keys()
             .cloned()
-            .map(|key| key.into_ident())
+            .map(IdentOrIndex::into_ident)
             .collect();
         let types: Vec<_> = excluded.values().collect();
 
@@ -270,7 +367,7 @@ impl<'a> Emitter<'a> {
         let exc: Vec<_> = excluded.keys().collect();
 
         if args.len() > 5 {
-            attrs.push(syn::parse_quote!(#[allow(clippy::too_many_arguments)]))
+            attrs.push(syn::parse_quote!(#[allow(clippy::too_many_arguments)]));
         }
 
         self.tokens.extend(quote::quote! {
@@ -308,7 +405,144 @@ impl<'a> Emitter<'a> {
                         value.#method()
                     }
                 }
-            })
+            });
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn emit_try_from_conversions(
+        &mut self,
+        substruct: &syn::DeriveInput,
+        included: &IndexMap<IdentOrIndex, syn::Type>,
+        excluded: &IndexMap<IdentOrIndex, syn::Type>,
+        field_configs: &IndexMap<IdentOrIndex, FieldConfig>,
+    ) {
+        let original = &self.input.ident;
+        let name = &substruct.ident;
+        let (impl_generics, ty_generics, where_clause) = substruct.generics.split_for_impl();
+        let error_name = syn::Ident::new(&format!("{original}ConversionError"), original.span());
+
+        // Emit the error type if this is the first substruct that needs it
+        if self.requires_try_from.values().filter(|&&x| x).count() == 1 {
+            self.emit_try_from_error();
+        }
+
+        let mut try_from_assignments = Vec::new();
+        let mut regular_assignments = Vec::new();
+
+        for (id, _ty) in included {
+            let config = &field_configs[id];
+            let inc_dst = id;
+
+            match &config.transform {
+                FieldTransform::Unwrap => {
+                    let field_name = match id {
+                        IdentOrIndex::Ident(ident) => ident.to_string(),
+                        IdentOrIndex::Index(idx) => format!("field_{idx}"),
+                    };
+                    try_from_assignments.push(quote::quote! {
+                        #inc_dst: value.#inc_dst.ok_or(#error_name::MissingRequiredField(#field_name))?
+                    });
+                }
+                FieldTransform::TryInto(_target_type) => {
+                    let field_name = match id {
+                        IdentOrIndex::Ident(ident) => ident.to_string(),
+                        IdentOrIndex::Index(idx) => format!("field_{idx}"),
+                    };
+                    try_from_assignments.push(quote::quote! {
+                        #inc_dst: value.#inc_dst.try_into().map_err(|_| #error_name::ConversionFailed(#field_name))?
+                    });
+                }
+                FieldTransform::None => {
+                    regular_assignments.push(quote::quote! {
+                        #inc_dst: value.#inc_dst
+                    });
+                }
+            }
+        }
+
+        self.tokens.extend(quote::quote! {
+            impl #impl_generics TryFrom<#original #ty_generics> for #name #ty_generics
+            #where_clause
+            {
+                type Error = #error_name;
+
+                fn try_from(value: #original #ty_generics) -> Result<Self, Self::Error> {
+                    Ok(Self {
+                        #( #try_from_assignments, )*
+                        #( #regular_assignments, )*
+                    })
+                }
+            }
+        });
+
+        // Still emit regular into_ method for building the original struct
+        let has_transformations = field_configs
+            .values()
+            .any(|config| !matches!(config.transform, FieldTransform::None));
+
+        if !excluded.is_empty() || has_transformations {
+            let args: Vec<_> = excluded
+                .keys()
+                .cloned()
+                .map(IdentOrIndex::into_ident)
+                .collect();
+            let types: Vec<_> = excluded.values().collect();
+            let exc: Vec<_> = excluded.keys().collect();
+
+            let inc_src: Vec<_> = included
+                .keys()
+                .enumerate()
+                .map(|(index, name)| match name {
+                    IdentOrIndex::Ident(ident) => IdentOrIndex::Ident(ident.clone()),
+                    IdentOrIndex::Index(_) => IdentOrIndex::Index(index),
+                })
+                .collect();
+
+            let mut into_assignments = Vec::new();
+            for (src, dst) in inc_src.iter().zip(included.keys()) {
+                let config = &field_configs[dst];
+                match &config.transform {
+                    FieldTransform::Unwrap => {
+                        into_assignments.push(quote::quote! {
+                            #dst: Some(self.#src)
+                        });
+                    }
+                    FieldTransform::TryInto(_target_type) => {
+                        into_assignments.push(quote::quote! {
+                            #dst: self.#src.try_into().expect(&format!(
+                                "reverse conversion failed for field `{}` from source `{}`",
+                                stringify!(#dst),
+                                stringify!(#src)
+                            ))
+                        });
+                    }
+                    FieldTransform::None => {
+                        into_assignments.push(quote::quote! {
+                            #dst: self.#src
+                        });
+                    }
+                }
+            }
+
+            let method = syn::Ident::new(
+                &format!("into_{}", self.input.ident.to_string().to_snake_case()),
+                Span::call_site(),
+            );
+
+            self.tokens.extend(quote::quote! {
+                impl #impl_generics #name #ty_generics
+                #where_clause
+                {
+                    #[doc = concat!("Convert `self` into a [`", stringify!(#original), "`].")]
+                    pub fn #method(self, #( #args: #types, )*) -> #original #ty_generics {
+                        #original {
+                            #( #into_assignments, )*
+                            #( #exc: #args, )*
+                        }
+                    }
+                }
+            });
         }
     }
 
@@ -333,6 +567,15 @@ impl<'a> Emitter<'a> {
     }
 
     fn filter_field(&mut self, field: &mut syn::Field, name: &syn::Ident) -> bool {
+        let (included, _config) = self.filter_field_with_config(field, name);
+        included
+    }
+
+    fn filter_field_with_config(
+        &mut self,
+        field: &mut syn::Field,
+        name: &syn::Ident,
+    ) -> (bool, FieldConfig) {
         let substruct: Vec<_> = field
             .attrs
             .iter()
@@ -369,21 +612,101 @@ impl<'a> Emitter<'a> {
 
         let arg = match substruct.matching(name) {
             Some(arg) => arg,
-            None => return false,
+            None => {
+                return (
+                    false,
+                    FieldConfig {
+                        docs: Vec::new(),
+                        vis: syn::Visibility::Inherited,
+                        transform: FieldTransform::None,
+                    },
+                )
+            }
         };
+
+        // Check for transformation in the matching expression
+        let mut transform = FieldTransform::None;
+        if let Some(transform_type) = arg.expr.get_transform(name) {
+            match transform_type {
+                TransformType::Unwrap => {
+                    transform = FieldTransform::Unwrap;
+
+                    // Transform the field type from Option<T> to T
+                    // If the field type isn't an Option<...> provide a helpful diagnostic.
+                    if let syn::Type::Path(type_path) = &field.ty {
+                        if let Some(segment) = type_path.path.segments.last() {
+                            if segment.ident == "Option" {
+                                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                                {
+                                    if let Some(syn::GenericArgument::Type(inner_type)) =
+                                        args.args.first()
+                                    {
+                                        field.ty = inner_type.clone();
+                                    } else {
+                                        // Angle bracketed args present but no generic type found
+                                        self.errors.push(syn::Error::new_spanned(
+                                            &field.ty,
+                                            "expected `Option<...>` with an inner type for the `unwrap` transform",
+                                        ));
+                                    }
+                                } else {
+                                    // Not angle-bracketed arguments (unlikely), report diagnostic
+                                    self.errors.push(syn::Error::new_spanned(
+                                        &field.ty,
+                                        "expected `Option<...>` for the `unwrap` transform",
+                                    ));
+                                }
+                            } else {
+                                // The last path segment is not `Option`
+                                self.errors.push(syn::Error::new_spanned(
+                                    &field.ty,
+                                    "the `unwrap` transform was specified but the field is not an `Option`",
+                                ));
+                            }
+                        } else {
+                            // No path segments found (unexpected shape)
+                            self.errors.push(syn::Error::new_spanned(
+                                &field.ty,
+                                "the `unwrap` transform was specified but the field is not an `Option`",
+                            ));
+                        }
+                    } else {
+                        // Field type is not a path (e.g. a tuple or reference), emit diagnostic
+                        self.errors.push(syn::Error::new_spanned(
+                            &field.ty,
+                            "the `unwrap` transform was specified but the field is not an `Option`",
+                        ));
+                    }
+                }
+                TransformType::TryInto(target_type_box) => {
+                    // `TransformType::TryInto` stores a boxed `syn::Type` to avoid large
+                    // enum variants. Unbox and clone the inner type for use here.
+                    let target_type: syn::Type = (**target_type_box).clone();
+                    transform = FieldTransform::TryInto(Box::new(target_type.clone()));
+                    // Replace the field type with the target type
+                    field.ty = target_type.clone();
+                }
+            }
+        }
 
         self.filter_attrs(&mut field.attrs, name);
 
-        if !matches!(arg.vis, syn::Visibility::Inherited) {
-            field.vis = arg.vis.clone();
+        let config = FieldConfig {
+            docs: arg.docs.clone(),
+            vis: arg.vis.clone(),
+            transform,
+        };
+
+        if !matches!(config.vis, syn::Visibility::Inherited) {
+            field.vis = config.vis.clone();
         }
 
-        if !arg.docs.is_empty() {
+        if !config.docs.is_empty() {
             field.attrs.retain(|attr| !attr.path().is_ident("doc"));
-            field.attrs.extend_from_slice(&arg.docs);
+            field.attrs.extend_from_slice(&config.docs);
         }
 
-        true
+        (true, config)
     }
 
     fn filter_attrs(&mut self, attrs: &mut Vec<syn::Attribute>, name: &syn::Ident) {

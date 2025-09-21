@@ -1,0 +1,5 @@
+error: expected `=`
+ --> tests/ui/fail/invalid-try-into-syntax.rs:6:41
+  |
+6 |     #[substruct(ConvertedParams(try_into))]
+  |                                         ^
